@@ -321,6 +321,10 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             config is not None
             and getattr(config, "index_k_norm_type", "layer") == "rms"
         )
+        # GigaChat 4 trains its indexer without the Hadamard rotation.
+        self.rotate_activation_enabled = config is None or getattr(
+            config, "index_rotate_activation", True
+        )
         aiter_fused_fp8_requested = (
             _is_hip
             and _use_aiter
@@ -704,6 +708,8 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
         # the index-K cache matches the fused path that decode reads back.
         if self.use_dsa_indexer_fusion or self.use_aiter_fused_fp8_writer:
             return x
+        if not self.rotate_activation_enabled:
+            return x
         return rotate_activation(x)
 
     def _gfx950_fused_decode(
@@ -1013,7 +1019,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             dummy_q_rope = k_rope
         _, k_rope = self.rotary_emb(positions, dummy_q_rope, k_rope)
         self._update_rope_guarded(key[..., : self.rope_head_dim], k_rope)
-        if apply_hadamard:
+        if apply_hadamard and self.rotate_activation_enabled:
             key = rotate_activation(key)
 
         return key
