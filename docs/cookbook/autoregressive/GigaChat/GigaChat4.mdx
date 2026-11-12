@@ -1,0 +1,177 @@
+---
+title: GigaChat 4
+description: "Serve GigaChat 4 with hybrid DSA and GDN attention, MTP speculative decoding, reasoning, and tool calling."
+tag: NEW
+---
+
+GigaChat 4 combines DeepSeek Sparse Attention (DSA), Gated DeltaNet (GDN) linear attention, and routed and shared MoE experts. Its checkpoint config controls gated normalization, attention gates, SwiGLU clipping, and logit softcapping. The bundled NextN layer supports MTP speculative decoding.
+
+## Prerequisites
+
+- Linux with NVIDIA CUDA and an SGLang checkout containing GigaChat 4 support. Follow the [installation guide](/docs/get-started/install) for your platform.
+- A checkpoint with `model_type: "gigachat4"` and `architectures: ["GigaChat4ForCausalLM"]`, including its tokenizer and `chat_template.jinja`.
+- For the 700B FP8 configuration below, two nodes with eight H100 80 GB GPUs each, shared checkpoint storage, and network connectivity for distributed inference.
+
+<Note>
+The FP8 target-only configuration below was validated with a 4,096-token context and up to four running requests. Radix caching, overlap scheduling, and CUDA graphs remain enabled. The BF16 recipe uses CPU offload and disables CUDA graphs to fit the same GPU allocation.
+</Note>
+
+## Serve the 700B FP8 checkpoint
+
+Run this command on both nodes. Set `NODE_RANK=0` on the first node and `NODE_RANK=1` on the second. Set `MASTER_ADDR` to the first node's address reachable from both nodes. The API is served on the first node.
+
+```bash
+export MODEL_PATH=/path/to/GigaChat4-700B-FP8
+export MASTER_ADDR=master-node-address
+export NODE_RANK=0
+
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --tp-size 16 \
+  --nnodes 2 \
+  --node-rank "$NODE_RANK" \
+  --dist-init-addr "$MASTER_ADDR:50000" \
+  --host 0.0.0.0 \
+  --port 30000 \
+  --context-length 4096 \
+  --max-running-requests 4 \
+  --reasoning-parser gigachat4 \
+  --tool-call-parser gigachat4
+```
+
+## Enable MTP speculative decoding
+
+Add these options to the command on both nodes:
+
+```bash
+  --speculative-algorithm EAGLE \
+  --speculative-draft-model-path "$MODEL_PATH" \
+  --speculative-num-steps 3 \
+  --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 4
+```
+
+This recipe reuses the checkpoint's single MTP layer for three draft steps. Keep the target and bundled draft checkpoint paths identical. MTP and DFlash2 use different draft models and require separate validation.
+
+MTP passed instant/reasoning, streaming/non-streaming, multi-turn, tool-call round-trip, and concurrent-request checks with the cache and scheduling settings above. Decode batch size four was confirmed in the server log. Long-prefix chat checks returned the expected arithmetic answers and code word both before and after a cache hit. Exact token parity across cache states remains under investigation, as described below.
+
+Keep the checkpoint, other server options, prompts, and sampling parameters identical when comparing output quality and performance.
+
+## Serve BF16 weights with CPU offload
+
+The BF16 weights exceed the capacity of sixteen H100 80 GB GPUs before allocating KV cache and working buffers. This target-only recipe uses a 24 GiB CPU offload budget per process. With eight processes on each node, budget about 192 GiB of host memory per node for offloaded parameters, plus memory for the loader and other processes. Host-to-device transfers limit inference speed.
+
+Set `MASTER_ADDR` and `NODE_RANK` on both nodes as in the FP8 recipe:
+
+```bash
+export MODEL_PATH=/path/to/GigaChat4-700B-BF16
+
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --tp-size 16 \
+  --nnodes 2 \
+  --node-rank "$NODE_RANK" \
+  --dist-init-addr "$MASTER_ADDR:50000" \
+  --host 0.0.0.0 \
+  --port 30000 \
+  --context-length 4096 \
+  --max-running-requests 4 \
+  --reasoning-parser gigachat4 \
+  --tool-call-parser gigachat4 \
+  --cpu-offload-gb 24 \
+  --cuda-graph-backend-decode disabled \
+  --cuda-graph-backend-prefill disabled
+```
+
+Validation covered seven selected chat API checks, three 40-token continuations, and a 3,116-token chat retrieval request. The API checks covered instant/reasoning arithmetic with and without streaming, instant multi-turn history with and without streaming, and a non-streaming tool-call round trip. BF16 batching and speculative decoding were not evaluated in this run.
+
+## Select instant or reasoning mode
+
+Set `chat_template_kwargs.reasoning` in each chat request. `false` closes the empty thinking block in the generation prompt; `true` leaves it open for the model to produce reasoning. Keep the `gigachat4` reasoning parser enabled in both modes. It separates generated reasoning into `reasoning_content`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:30000/v1", api_key="EMPTY")
+model = client.models.list().data[0].id
+
+for reasoning in (False, True):
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": "Сколько будет 17 × 23?"}],
+        temperature=0,
+        max_tokens=512,
+        extra_body={"chat_template_kwargs": {"reasoning": reasoning}},
+    )
+    message = response.choices[0].message
+    print("Reasoning:", getattr(message, "reasoning_content", None))
+    print("Answer:", message.content)
+```
+
+## Tool calling and conversation history
+
+Use the OpenAI `tools` schema with `--tool-call-parser gigachat4`. The parser converts the model's GCML output into `tool_calls`, including streaming deltas. For the next turn, include the assistant message with its tool calls, followed by one `tool` message for each `tool_call_id`.
+
+Preserve `reasoning_content` on assistant history messages when available. The template accepts it on the assistant message; standalone `reasoning` or `assistant thinking` messages are unsupported. The `drop_history_thinking` template argument controls whether earlier assistant reasoning is retained.
+
+See [tool calling](/docs/advanced_features/tool_parser) for request and streaming examples.
+
+## Benchmark the serving configuration
+
+Run the same workload against the target-only and MTP servers. This example fixes the input and output lengths and records TTFT, TPOT, latency, and throughput through the serving benchmark:
+
+```bash
+python -m sglang.benchmark.serving \
+  --backend sglang \
+  --host 127.0.0.1 \
+  --port 30000 \
+  --model "$MODEL_PATH" \
+  --dataset-name random \
+  --random-input-len 512 \
+  --random-output-len 128 \
+  --random-range-ratio 1 \
+  --tokenize-prompt \
+  --num-prompts 16 \
+  --max-concurrency 1 \
+  --warmup-requests 2 \
+  --seed 42 \
+  --flush-cache \
+  --output-details \
+  --output-file giga4-512-128-c1.jsonl
+```
+
+Random token workloads measure serving performance, not model quality. For quality and MTP acceptance comparisons, use the same natural-language dataset, tokenized inputs, chat template, reasoning mode, and sampling settings in both engines.
+
+For concurrent requests, increase benchmark `--max-concurrency` up to the server's `--max-running-requests`. Confirm the actual decode batch size in the server log; client concurrency alone does not establish GPU batching. Keep input plus output length within the server context limit.
+
+### Target-only measurements
+
+The following FP8 target-only results were collected on two nodes with eight H100 80 GB GPUs each, TP16, a 4,096-token context, and four request slots. Each scenario used 16 measured requests, two warmup requests, fixed token lengths, and seed 42. Radix caching, overlap scheduling, and CUDA graphs were enabled. All 96 measured requests completed with the requested output lengths.
+
+| Input tokens | Output tokens | Concurrency | Output tokens/s | Mean TTFT (ms) | Mean TPOT (ms) |
+| --- | --- | --- | --- | --- | --- |
+| 512 | 128 | 1 | 41.3 | 103.2 | 23.61 |
+| 512 | 128 | 4 | 139.4 | 316.3 | 26.40 |
+| 3072 | 128 | 1 | 37.6 | 394.0 | 23.69 |
+| 3072 | 128 | 4 | 107.5 | 1274.7 | 27.42 |
+| 512 | 512 | 1 | 42.1 | 103.6 | 23.62 |
+| 512 | 512 | 4 | 148.9 | 292.7 | 26.34 |
+
+Decode batch size four was confirmed separately in the server log. A repeated-prefix check reused 1,728 cached tokens and produced the same output tokens as the uncached request. These checks do not establish identical outputs across all batch sizes: some longer greedy continuations differed between single-request and batched execution, and that difference remains under investigation.
+
+### MTP measurements
+
+The same workloads and server settings with EAGLE 3/1/4 produced the results below. All 96 measured requests completed with the requested output lengths. The throughput ratio compares each row with the corresponding target-only row above.
+
+| Input tokens | Output tokens | Concurrency | Output tokens/s | Mean TTFT (ms) | Mean TPOT (ms) | Accept length | Throughput ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 512 | 128 | 1 | 107.6 | 127.9 | 8.34 | 3.54 | 2.61 |
+| 512 | 128 | 4 | 260.0 | 267.4 | 12.28 | 3.48 | 1.87 |
+| 3072 | 128 | 1 | 90.5 | 428.8 | 7.74 | 3.83 | 2.41 |
+| 3072 | 128 | 4 | 177.7 | 1096.9 | 13.29 | 3.84 | 1.65 |
+| 512 | 512 | 1 | 120.0 | 124.7 | 8.10 | 3.61 | 2.85 |
+| 512 | 512 | 4 | 320.9 | 222.9 | 11.47 | 3.53 | 2.16 |
+
+Accept length here describes random benchmark prompts. It does not establish acceptance or quality on a natural-language evaluation dataset. Some FP8 greedy continuations also differed between cached and uncached prefill with identical input token IDs, including one-token requests that do not run speculative verification. The cause of those numerical differences remains under investigation; these throughput measurements do not establish exact decoding equivalence.
+
+{/* TODO: Add matched natural-language quality and acceptance comparisons. */}
