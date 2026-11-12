@@ -321,7 +321,6 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             config is not None
             and getattr(config, "index_k_norm_type", "layer") == "rms"
         )
-        # GigaChat 4 trains its indexer without the Hadamard rotation.
         self.rotate_activation_enabled = config is None or getattr(
             config, "index_rotate_activation", True
         )

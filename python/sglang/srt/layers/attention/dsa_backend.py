@@ -688,8 +688,7 @@ class DeepseekSparseAttnBackend(
         self.speculative_num_steps = speculative_num_steps
         self.speculative_num_draft_tokens = get_spec().speculative_num_draft_tokens
         self.speculative_step_id = speculative_step_id
-        # A chain draft's decode step i sits at seq_lens + i, so its decode
-        # metadata must cover the i + 1 drafted keys (chains only).
+
         self.draft_decode_len = (
             speculative_step_id + 1 if speculative_num_steps and self.topk <= 1 else 0
         )
@@ -4367,8 +4366,6 @@ class DeepseekSparseAttnMultiStepBackend:
             return
 
         bs = forward_batch.batch_size
-        # Chain steps attend different lengths, so step 0's metadata cannot be
-        # shared; tree steps are identical and keep the shared paths below.
         if self.attn_backends[0].draft_decode_len:
             for backend in self.attn_backends:
                 precomputed = backend._precompute_replay_metadata(
