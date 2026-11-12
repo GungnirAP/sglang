@@ -1,18 +1,11 @@
 """GigaChat 4 model.
 
-GigaChat 4 is the GigaChat 3.5 architecture (hybrid GDN + MLA stack, gated
-norms, gated attention) plus DSA sparse attention on the full-attention layers
-and final-logit soft-capping. Both additions are driven by the architecture
-name and the config rather than by new layer code: ``is_deepseek_dsa`` enables
-the DSA indexer, backend and KV pool inside the inherited DeepSeek attention,
-and ``LogitsProcessor`` applies ``final_logit_softcapping``.
+Built on GigaChat 3.5 layers, norms and attention gates. DSA is enabled by the
+model config and implemented by the inherited DeepSeek attention;
+LogitsProcessor applies the configured final-logit soft-capping.
 
-The classes below add only the DSA glue the GigaChat 3.5 classes don't carry:
-the decoder layer drops the top-k indices a DSA attention returns next to its
-hidden states, and restores the NextN flags on the attention (GigaChat 3.5
-rebuilds the DeepSeek attention without ``is_nextn``). The constructors
-otherwise mirror their GigaChat 3.5 counterparts with the GigaChat 4 classes
-swapped in.
+The decoder adapts DSA attention outputs and NextN flags for MTP. The model
+also supports auxiliary hidden-state capture for DFlash.
 """
 
 from __future__ import annotations
@@ -206,7 +199,13 @@ class GigaChat4Model(GigaChat35Model):
         if not self.pp_group.is_last_rank:
             return residual_batch.to_pp(hidden_states, forward_batch)
         hidden_states = residual_batch.final_norm(
-            hidden_states, forward_batch, self.norm, skip_empty=True
+            hidden_states,
+            forward_batch,
+            self.norm,
+            capture=aux_hidden_states.capture
+            if self.end_layer in self.layers_to_capture
+            else None,
+            skip_empty=True,
         )
         if len(aux_hidden_states) == 0:
             return hidden_states
