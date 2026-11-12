@@ -2,8 +2,6 @@
 
 The GigaChat 3.5 NextN block built from the GigaChat 4 decoder layer: the
 NextN layer is DSA like the target, with its own indexer and per-step top-k.
-The constructors mirror their 3.5 counterparts with the GigaChat 4 classes
-swapped in.
 """
 
 from __future__ import annotations
@@ -21,12 +19,12 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from sglang.srt.models.gigachat4 import GigaChat4DecoderLayer
 from sglang.srt.models.gigachat35 import build_norm
 from sglang.srt.models.gigachat35_mtp import (
     GigaChat35ForCausalLMNextN,
     GigaChat35ModelNextN,
 )
-from sglang.srt.models.gigachat4 import GigaChat4DecoderLayer
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix
 

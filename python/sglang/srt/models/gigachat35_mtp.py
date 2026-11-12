@@ -33,6 +33,7 @@ from sglang.srt.models.deepseek_common.deepseek_weight_loader import (
     NextNEnabledConfig,
 )
 from sglang.srt.models.gigachat35 import (
+    _GIGACHAT_WEIGHT_MAPPER,
     GigaChat35Config,
     GigaChat35DecoderLayer,
     _remap_gigachat_weight_names,
@@ -132,6 +133,8 @@ class GigaChat35ModelNextN(nn.Module):
 
 
 class GigaChat35ForCausalLMNextN(DeepseekV2WeightLoaderMixin, nn.Module):
+    hf_to_sglang_mapper = _GIGACHAT_WEIGHT_MAPPER
+
     def __init__(
         self,
         config: GigaChat35Config,
