@@ -688,10 +688,6 @@ class DeepseekSparseAttnBackend(
         self.speculative_num_steps = speculative_num_steps
         self.speculative_num_draft_tokens = get_spec().speculative_num_draft_tokens
         self.speculative_step_id = speculative_step_id
-
-        self.draft_decode_len = (
-            speculative_step_id + 1 if speculative_num_steps and self.topk <= 1 else 0
-        )
         self.use_fused_topk = should_use_dsa_fused_topk(seed_dsa_topk_from_draft_extend)
         if envs.SGLANG_DSA_FUSE_TOPK.get() and not self.use_fused_topk:
             print_warning_once(
@@ -1129,8 +1125,6 @@ class DeepseekSparseAttnBackend(
 
         if forward_batch.forward_mode.is_target_verify():
             draft_token_num = self.speculative_num_draft_tokens
-        elif forward_batch.forward_mode.is_decode_or_idle():
-            draft_token_num = self.draft_decode_len
         else:
             draft_token_num = 0
 
@@ -1674,7 +1668,7 @@ class DeepseekSparseAttnBackend(
         if forward_mode.is_decode_or_idle():
             # Normal Decode
             # Get sequence information
-            cache_seqlens_int32 = (seq_lens + self.draft_decode_len).to(torch.int32)
+            cache_seqlens_int32 = seq_lens.to(torch.int32)
             cu_seqlens_k = compute_cu_seqlens(cache_seqlens_int32)
 
             # Use max context length for seq_len_k
@@ -1871,9 +1865,6 @@ class DeepseekSparseAttnBackend(
         if forward_mode.is_decode_or_idle():
             # Normal Decode
             max_len = self._graph_page_table_width(metadata)
-            # A chain draft step's metadata covers the prefix plus its own chain.
-            if self.draft_decode_len:
-                seq_lens = seq_lens + self.draft_decode_len
 
             if (
                 (is_cuda() or _is_hip) and self.dsa_index_kpool <= 1
@@ -4366,22 +4357,6 @@ class DeepseekSparseAttnMultiStepBackend:
             return
 
         bs = forward_batch.batch_size
-        if self.attn_backends[0].draft_decode_len:
-            for backend in self.attn_backends:
-                precomputed = backend._precompute_replay_metadata(
-                    bs=bs,
-                    req_pool_indices=forward_batch.req_pool_indices,
-                    seq_lens=forward_batch.seq_lens,
-                    seq_lens_cpu=forward_batch.seq_lens_cpu,
-                    forward_mode=ForwardMode.DECODE,
-                )
-                backend.init_forward_metadata_replay_cuda_graph_from_precomputed(
-                    bs=bs,
-                    precomputed=precomputed,
-                    forward_mode=ForwardMode.DECODE,
-                )
-            return
-
         # Precompute metadata once (shared across all backends)
         precomputed = self.attn_backends[0]._precompute_replay_metadata(
             bs=bs,
